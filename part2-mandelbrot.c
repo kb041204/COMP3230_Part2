@@ -5,7 +5,7 @@ File name:	part2-mandelbrot.c
 Name:		Chan Tik Shun
 Student ID:	3035536553
 Date: 		23/11/2019 
-Version: 	1.2
+Version: 	1.21
 Platform:	X2GO (Xfce 4.12, distributed by Xubuntu)
 Compilation:	gcc part2-mandelbrot.c -o part2-mandelbrot -l SDL2 -l m -pthread
 */
@@ -13,11 +13,7 @@ Compilation:	gcc part2-mandelbrot.c -o part2-mandelbrot -l SDL2 -l m -pthread
 //Using SDL2 and standard IO
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <sys/resource.h>
-#include <signal.h>
 #include <unistd.h>
 #include "Mandel.h"
 #include "draw.h"
@@ -29,43 +25,38 @@ typedef struct task {
 	int num_of_rows;
 } TASK;
 
-
-typedef struct message {
-	int row_index;
-	float rowdata[IMAGE_WIDTH];
-} MSG;
-
 float * pixels; //store the 2D image as a linear array of pixels (in row-major format)
 
 TASK ** pool; //create buffer array
-int pool_size = 0;
-int task_in_pool = 0;
-int next_to_put = 0;
-int next_to_pull = 0;
+int pool_size = 0; // = argument 3
+int task_in_pool = 0; //total number of task in the pool
+int next_to_put = 0; //pointer to the next position of tasks to put
+int next_to_get = 0; //pointer to the next position of tasks to get
 
-pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t new_task = PTHREAD_COND_INITIALIZER;
-pthread_cond_t not_full = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER; //mutex lock for the pool
+pthread_cond_t new_task = PTHREAD_COND_INITIALIZER; //condition variable for new task available
+pthread_cond_t not_full = PTHREAD_COND_INITIALIZER; //condition variable for pool not full
 
-int total_row_assigned = 0;
-int total_row_done = 0;
-int all_tasks_put_into_buffer = 0;
+int total_row_assigned = 0; //total row assigned to consumer
+int total_row_done = 0; //total row completed by consumer
+int all_tasks_put_into_buffer = 0; //boolean whether all tasks are put into the pool
+
 //====================CONSUMER====================
 void *thread_func (void *arg) {
 
-	int id = *((int *)arg);
+	int id = *((int *)arg); //assign id from pointer
 
 	printf("Worker(%d): Start up. Wait for task!\n", id);
 
-	int * individual_tasks_done = (int *)malloc(sizeof(int)); //tasks done from this thread
+	int * individual_tasks_done = (int *)malloc(sizeof(int)); //tasks done of this thread
 
-	while(total_row_assigned != IMAGE_HEIGHT || !all_tasks_put_into_buffer) {
+	while(total_row_assigned != IMAGE_HEIGHT || !all_tasks_put_into_buffer) { //not yet terminated
 		pthread_mutex_lock(&pool_lock); //1.1: acquire pool lock
 		while(task_in_pool == 0) //1.2: task pool is empty
 			pthread_cond_wait(&new_task, &pool_lock); //1.21: wait for signal new_task
 
-		TASK * curr_task = *(pool + next_to_pull); //1.3: copy the task from buffer
-		next_to_pull = (next_to_pull + 1) % pool_size; //1.4: change the next pointer
+		TASK * curr_task = *(pool + next_to_get); //1.3: copy the task from buffer
+		next_to_get = (next_to_get + 1) % pool_size; //1.4: change the next pointer
 		task_in_pool--;
 		
 		total_row_assigned += curr_task->num_of_rows; //update statistics for other threads
@@ -92,7 +83,7 @@ void *thread_func (void *arg) {
 		(*individual_tasks_done)++;
 		total_row_done += curr_task->num_of_rows; //update statistics for main thread
 	}
-	pthread_exit((void *)individual_tasks_done); //terminate thread and return pointer to tasks done
+	pthread_exit((void *)individual_tasks_done); //terminate current thread and return pointer of tasks done
 }
 
 //====================MAIN====================
@@ -106,7 +97,7 @@ int main( int argc, char* args[] )
 		exit(0);
 	}
 
-	if(atoi(args[1])*atoi(args[2])>IMAGE_HEIGHT) {
+	if(atoi(args[1])*atoi(args[2])>IMAGE_HEIGHT) { //these lines should never be reached, if 1<=arg1<=16 & 1<=arg2<=50
 		printf("Number of workers times number of line is larger than %d, please try again.\n", IMAGE_HEIGHT);
 		exit(0);
 	}
@@ -128,21 +119,21 @@ int main( int argc, char* args[] )
 	
 	clock_gettime(CLOCK_MONOTONIC, &start_compute);
 
-	float difftime, child_difftime;
+	float difftime;
 	
 	int rows_to_complete = atoi(args[2]);
 
 	//====================PRODUCER====================
-	int * thread_number = (int *)malloc(sizeof(int)*atoi(args[1])); // array for storing thread number (from 0 to n-1), used for storing the (void * arg) of thread func
+	int * thread_number = (int *)malloc(sizeof(int)*atoi(args[1])); //array for storing thread number (from 0 to n-1), used for storing the (void * arg) of thread func
 
 	pool_size = atoi(args[3]);
 
-	pool = malloc(pool_size * sizeof(pool)); // allocate memory to pool
+	pool = malloc(pool_size * sizeof(pool)); //allocate memory to pool
 
 	//create threads
 	for(int i=0; i<atoi(args[1]); i++) {
-		*(thread_number + i) = i; // for recording the thread number
-		int status = pthread_create(&(thread_id[i]), NULL, thread_func, (void*)(thread_number + i)); // passing the thread number into the pointer for consistent result
+		*(thread_number + i) = i; //for recording the thread number
+		int status = pthread_create(&(thread_id[i]), NULL, thread_func, (void*)(thread_number + i)); //passing the thread number into the pointer for consistent result
 		if(status != 0) {
 			printf("Fail to create thread %d, terminate program now...\n", i);
 			exit(0);
@@ -154,7 +145,7 @@ int main( int argc, char* args[] )
 	while(curr_row <= IMAGE_HEIGHT) {
 		pthread_mutex_lock(&pool_lock); //1.1: acquire the lock
 		while(task_in_pool == pool_size) //1.2: task poll is full
-			pthread_cond_wait(&not_full, &pool_lock); //1.21 wait for signal not_full
+			pthread_cond_wait(&not_full, &pool_lock); //1.21: wait for signal not_full
 		
 		//create new task
 		TASK * temp_task = (TASK *)malloc(sizeof(temp_task));
@@ -180,18 +171,18 @@ int main( int argc, char* args[] )
 
 	while(total_row_done != IMAGE_HEIGHT); //wait for all the thread to terminate
 
-	//3: join threads, collect and print tasks completed foe each thread
+	//3: join all the threads, collect and print tasks completed foe each thread
 	for(int i=0; i<atoi(args[1]); i++) {
 		int * task_completed;
 		pthread_join(thread_id[i], (void **) &task_completed);
-		printf("Worker thread %d has terminated and completed %d tasks\n", i, *task_completed);
+		printf("Worker thread %d has terminated and completed %d tasks.\n", i, *task_completed);
 	}	
 
 	printf("All worker threads have terminated\n");
 
 	//report process timing in user & system mode
-	struct rusage temp;
-	getrusage(RUSAGE_SELF, &temp);
+	struct rusage temp; //for timing report
+	getrusage(RUSAGE_SELF, &temp); //for timing report
 	printf("Total time spent by process in user mode = %.3f ms\n", (float) ((float)temp.ru_utime.tv_sec*(float)1000 + (float)temp.ru_utime.tv_usec/(float)1000));
 	printf("Total time spent by process in system mode = %.3f ms\n", (float) ((float)temp.ru_stime.tv_sec*(float)1000 + (float)temp.ru_stime.tv_usec/(float)1000));
 
